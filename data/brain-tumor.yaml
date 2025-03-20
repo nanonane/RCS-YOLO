@@ -1,0 +1,11 @@
+# Brain tumor dataset by Cheng, Jun, et al. https://figshare.com/articles/dataset/brain_tumor_dataset/1512427
+
+# train and val data as the following directories
+train: dataset-brain-tumor/traindata
+val: dataset-brain-tumor/valdata
+
+# number of classes
+nc: 3
+
+# class names
+names: ["pituitary tumor", "meningioma", "glioma"]

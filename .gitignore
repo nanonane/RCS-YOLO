@@ -1,0 +1,8 @@
+logs/
+runs/
+
+dataset-brain-tumor/traindata
+dataset-brain-tumor/valdata
+
+train.sh
+test.sh
