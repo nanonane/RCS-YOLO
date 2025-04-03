@@ -1,8 +1,12 @@
 logs/
 runs/
 
+# datasets
+dataset-Br35H/reduced/
 dataset-brain-tumor/traindata
 dataset-brain-tumor/valdata
+dataset-brain-tumor/enhanced*
+dataset-brain-tumor/uncategorized*
 
 train.sh
 test.sh
