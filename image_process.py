@@ -57,7 +57,7 @@ def reduce_quality(img, contrast_factor=0.7, noise_std=25):
     return noisy
 
 
-def process_dataset(src_root, dst_root):
+def process_dataset(src_root, dst_root, process):
     """
     Process the entire dataset by enhancing images and saving them to a new location.
     
@@ -68,6 +68,7 @@ def process_dataset(src_root, dst_root):
     Args:
         src_root (str): Path to the source dataset root directory
         dst_root (str): Path to the target dataset root directory
+        process (function): Process function
         
     Note:
         - Target directory structure will be created automatically
@@ -92,11 +93,11 @@ def process_dataset(src_root, dst_root):
                 continue
 
             # Process image - can use either clahe or reduce_quality
-            enhanced_img = reduce_quality(img)  # or use reduce_quality(img)
+            processed_img = process(img)
 
             # Save enhanced image
             dst_img_path = os.path.join(dst_path, img_file.name)
-            cv2.imwrite(dst_img_path, enhanced_img)
+            cv2.imwrite(dst_img_path, processed_img)
 
             # Copy corresponding annotation file
             txt_file = img_file.with_suffix('.txt')
@@ -108,8 +109,8 @@ def process_dataset(src_root, dst_root):
 
 
 if __name__ == '__main__':
-    src_root = 'dataset-Br35H'
-    dst_root = 'dataset-Br35H/reduced/'
+    src_root = 'dataset-brain-tumor/uncategorized-reduced'
+    dst_root = 'dataset-brain-tumor/uncategorized-reduced-clahe'
 
-    process_dataset(src_root, dst_root)
+    process_dataset(src_root, dst_root, clahe)
     print("Dataset processing done.")
