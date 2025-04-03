@@ -38,3 +38,6 @@ thop  # FLOPs computation
 # albumentations>=1.0.3
 # pycocotools>=2.0  # COCO mAP
 # roboflow
+
+gradio>=3.50.0,<4.0.0 # visualization application
+fsspec>=2023.9.0,<2024.0.0
