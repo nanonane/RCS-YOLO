@@ -88,8 +88,8 @@ class Detect(nn.Module):
         score = z[:, :, 5:]
         score *= conf
         convert_matrix = torch.tensor([[1, 0, 1, 0], [0, 1, 0, 1], [-0.5, 0, 0.5, 0], [0, -0.5, 0, 0.5]],
-                                      dtype=torch.float32,
-                                      device=z.device)
+                                     dtype=torch.float32,
+                                     device=z.device)
         box @= convert_matrix
         return (box, score)
 
@@ -201,8 +201,8 @@ class IDetect(nn.Module):
         score = z[:, :, 5:]
         score *= conf
         convert_matrix = torch.tensor([[1, 0, 1, 0], [0, 1, 0, 1], [-0.5, 0, 0.5, 0], [0, -0.5, 0, 0.5]],
-                                      dtype=torch.float32,
-                                      device=z.device)
+                                     dtype=torch.float32,
+                                     device=z.device)
         box @= convert_matrix
         return (box, score)
 
@@ -426,8 +426,8 @@ class IAuxDetect(nn.Module):
         score = z[:, :, 5:]
         score *= conf
         convert_matrix = torch.tensor([[1, 0, 1, 0], [0, 1, 0, 1], [-0.5, 0, 0.5, 0], [0, -0.5, 0, 0.5]],
-                                      dtype=torch.float32,
-                                      device=z.device)
+                                     dtype=torch.float32,
+                                     device=z.device)
         box @= convert_matrix
         return (box, score)
 
@@ -504,6 +504,177 @@ class IBin(nn.Module):
         yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
         return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
 
+class IDecoupledHead(nn.Module):
+    stride = None  # strides computed during build
+    export = False  # onnx export
+    end2end = False
+    include_nms = False
+    concat = False
+
+    def __init__(self, nc=80, anchors=(), ch=()):  # detection layer
+        super(IDecoupledHead, self).__init__()
+        self.nc = nc  # number of classes
+        self.no = nc + 5  # number of outputs per anchor
+        self.nl = len(anchors)  # number of detection layers
+        self.na = len(anchors[0]) // 2  # number of anchors
+        self.grid = [torch.zeros(1)] * self.nl  # init grid
+        a = torch.tensor(anchors).float().view(self.nl, -1, 2)
+        self.register_buffer('anchors', a)  # shape(nl,na,2)
+        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
+        
+        # 解耦头部分
+        self.merge = nn.ModuleList(Conv(x, 256, 1, 1) for x in ch)
+        self.cls_convs1 = nn.ModuleList(Conv(256, 256, 3, 1, 1) for _ in ch)
+        self.cls_convs2 = nn.ModuleList(Conv(256, 256, 3, 1, 1) for _ in ch)
+        self.reg_convs1 = nn.ModuleList(Conv(256, 256, 3, 1, 1) for _ in ch)
+        self.reg_convs2 = nn.ModuleList(Conv(256, 256, 3, 1, 1) for _ in ch)
+        self.cls_preds = nn.ModuleList(nn.Conv2d(256, self.nc * self.na, 1) for _ in ch)
+        self.reg_preds = nn.ModuleList(nn.Conv2d(256, 4 * self.na, 1) for _ in ch)
+        self.obj_preds = nn.ModuleList(nn.Conv2d(256, 1 * self.na, 1) for _ in ch)
+        
+        # Implicit模块
+        self.ia = nn.ModuleList(ImplicitA(x) for x in ch)
+        self.im_cls = nn.ModuleList(ImplicitM(self.nc * self.na) for _ in ch)
+        self.im_reg = nn.ModuleList(ImplicitM(4 * self.na) for _ in ch)
+        self.im_obj = nn.ModuleList(ImplicitM(1 * self.na) for _ in ch)
+
+    def forward(self, x):
+        z = []  # inference output
+        self.training |= self.export
+        
+        for i in range(self.nl):
+            # 应用ImplicitA
+            x_ia = self.ia[i](x[i])
+            # 合并特征
+            x_merged = self.merge[i](x_ia)
+            # 分类分支
+            cls_feat = self.cls_convs1[i](x_merged)
+            cls_feat = self.cls_convs2[i](cls_feat)
+            cls_output = self.cls_preds[i](cls_feat)
+            cls_output = self.im_cls[i](cls_output)
+            # 回归分支
+            reg_feat = self.reg_convs1[i](x_merged)
+            reg_feat = self.reg_convs2[i](reg_feat)
+            reg_output = self.reg_preds[i](reg_feat)
+            reg_output = self.im_reg[i](reg_output)
+            obj_output = self.obj_preds[i](reg_feat)
+            obj_output = self.im_obj[i](obj_output)
+            
+            # 合并输出
+            output = torch.cat([reg_output, obj_output, cls_output], 1)
+            
+            bs, _, ny, nx = output.shape
+            output = output.view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            
+            x[i] = output  # 替换x[i]为处理后的输出
+            
+            if not self.training:  # inference
+                if self.grid[i].shape[2:4] != output.shape[2:4]:
+                    self.grid[i] = self._make_grid(nx, ny).to(output.device)
+                
+                y = output.sigmoid()
+                y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
+                y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+                z.append(y.view(bs, -1, self.no))
+                
+        return x if self.training else (torch.cat(z, 1), x)
+
+    def fuseforward(self, x):
+        z = []  # inference output
+        self.training |= self.export
+        
+        for i in range(self.nl):
+            # 合并特征
+            x_merged = self.merge[i](x[i])
+            # 分类分支
+            cls_feat = self.cls_convs1[i](x_merged)
+            cls_feat = self.cls_convs2[i](cls_feat)
+            cls_output = self.cls_preds[i](cls_feat)
+            # 回归分支
+            reg_feat = self.reg_convs1[i](x_merged)
+            reg_feat = self.reg_convs2[i](reg_feat)
+            reg_output = self.reg_preds[i](reg_feat)
+            obj_output = self.obj_preds[i](reg_feat)
+            
+            # 合并输出
+            output = torch.cat([reg_output, obj_output, cls_output], 1)
+            
+            bs, _, ny, nx = output.shape
+            output = output.view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            
+            x[i] = output
+            
+            if not self.training:  # inference
+                if self.grid[i].shape[2:4] != output.shape[2:4]:
+                    self.grid[i] = self._make_grid(nx, ny).to(output.device)
+                
+                y = output.sigmoid()
+                if not torch.onnx.is_in_onnx_export():
+                    y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
+                    y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+                else:
+                    xy, wh, conf = y.split((2, 2, self.nc + 1), 4)
+                    xy = xy * (2. * self.stride[i]) + (self.stride[i] * (self.grid[i] - 0.5))  # new xy
+                    wh = wh ** 2 * (4 * self.anchor_grid[i].data)  # new wh
+                    y = torch.cat((xy, wh, conf), 4)
+                z.append(y.view(bs, -1, self.no))
+                
+        if self.training:
+            out = x
+        elif self.end2end:
+            out = torch.cat(z, 1)
+        elif self.include_nms:
+            z = self.convert(z)
+            out = (z,)
+        elif self.concat:
+            out = torch.cat(z, 1)
+        else:
+            out = (torch.cat(z, 1), x)
+            
+        return out
+    
+    def fuse(self):
+        print("IDecoupledHead.fuse")
+        # 融合ImplicitA和卷积层
+        for i in range(self.nl):
+            # 融合ImplicitA和merge
+            c1_merge, c2_merge, _, _ = self.merge[i].conv.weight.shape
+            c1_ia, c2_ia, _, _ = self.ia[i].implicit.shape
+            self.merge[i].conv.bias += torch.matmul(self.merge[i].conv.weight.reshape(c1_merge, c2_merge),
+                                          self.ia[i].implicit.reshape(c2_ia, c1_ia)).squeeze(1)
+            
+            # 融合分类预测器的ImplicitM
+            c1_cls, c2_cls, _, _ = self.im_cls[i].implicit.shape
+            self.cls_preds[i].bias *= self.im_cls[i].implicit.reshape(c2_cls)
+            self.cls_preds[i].weight *= self.im_cls[i].implicit.transpose(0, 1)
+            
+            # 融合回归预测器的ImplicitM
+            c1_reg, c2_reg, _, _ = self.im_reg[i].implicit.shape
+            self.reg_preds[i].bias *= self.im_reg[i].implicit.reshape(c2_reg)
+            self.reg_preds[i].weight *= self.im_reg[i].implicit.transpose(0, 1)
+            
+            # 融合目标预测器的ImplicitM
+            c1_obj, c2_obj, _, _ = self.im_obj[i].implicit.shape
+            self.obj_preds[i].bias *= self.im_obj[i].implicit.reshape(c2_obj)
+            self.obj_preds[i].weight *= self.im_obj[i].implicit.transpose(0, 1)
+            
+    @staticmethod
+    def _make_grid(nx=20, ny=20):
+        yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
+        return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
+        
+    def convert(self, z):
+        z = torch.cat(z, 1)
+        box = z[:, :, :4]
+        conf = z[:, :, 4:5]
+        score = z[:, :, 5:]
+        score *= conf
+        convert_matrix = torch.tensor([[1, 0, 1, 0], [0, 1, 0, 1], [-0.5, 0, 0.5, 0], [0, -0.5, 0, 0.5]],
+                                     dtype=torch.float32,
+                                     device=z.device)
+        box @= convert_matrix
+        return (box, score)
+
 class Model(nn.Module):
     def __init__(self, cfg='yolor-csp-c.yaml', ch=3, nc=None, anchors=None, img_size=640):  # model, input channels, number of classes
         super(Model, self).__init__()
@@ -545,6 +716,14 @@ class Model(nn.Module):
             m.anchors /= m.stride.view(-1, 1, 1)
             self.stride = m.stride
             self._initialize_biases()  # only run once
+            # print('Strides: %s' % m.stride.tolist())
+        if isinstance(m, IDecoupledHead):
+            s = 256  # 2x min stride
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            check_anchor_order(m)
+            m.anchors /= m.stride.view(-1, 1, 1)
+            self.stride = m.stride
+            self._initialize_biases_decoupled()  # only run once
             # print('Strides: %s' % m.stride.tolist())
         if isinstance(m, IAuxDetect):
             s = 256  # 2x min stride
@@ -679,6 +858,21 @@ class Model(nn.Module):
             b.data[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
             mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
+    def _initialize_biases_decoupled(self, cf=None):  # initialize biases into DecoupledHead(), cf is class frequency
+        # https://arxiv.org/abs/1708.02002 section 3.3
+        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
+        m = self.model[-1]  # DecoupledHead() module
+        for i, s in enumerate(m.stride):  # from
+            # 初始化目标检测偏置
+            b_obj = m.obj_preds[i].bias.view(m.na, -1)
+            b_obj.data[:] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+            m.obj_preds[i].bias = torch.nn.Parameter(b_obj.view(-1), requires_grad=True)
+            
+            # 初始化分类预测偏置
+            b_cls = m.cls_preds[i].bias.view(m.na, -1)
+            b_cls.data[:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+            m.cls_preds[i].bias = torch.nn.Parameter(b_cls.view(-1), requires_grad=True)
+
     def _print_biases(self):
         m = self.model[-1]  # Detect() module
         for mi in m.m:  # from
@@ -703,7 +897,7 @@ class Model(nn.Module):
                 m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
                 delattr(m, 'bn')  # remove batchnorm
                 m.forward = m.fuseforward  # update forward
-            elif isinstance(m, (IDetect, IAuxDetect)):
+            elif isinstance(m, (IDetect, IAuxDetect, IDecoupledHead)):
                 m.fuse()
                 m.forward = m.fuseforward
             if type(m) is RepVGG:
@@ -812,7 +1006,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
             c2 = ch[f[0]]
         elif m is Foldcut:
             c2 = ch[f] // 2
-        elif m in [Detect, IDetect, IAuxDetect, IBin, IKeypoint]:
+        elif m in [Detect, IDetect, IAuxDetect, IBin, IKeypoint, IDecoupledHead]:
             args.append([ch[x] for x in f])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)
