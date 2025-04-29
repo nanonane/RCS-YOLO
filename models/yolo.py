@@ -523,7 +523,7 @@ class IDecoupledHead(nn.Module):
         self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
         
         # 解耦头部分
-        self.merge = nn.ModuleList(Conv(x, 256, 1, 1) for x in ch)
+        self.merge = nn.ModuleList(Conv(x, 256, 1, 1, bias=True) for x in ch)
         self.cls_convs1 = nn.ModuleList(Conv(256, 256, 3, 1, 1) for _ in ch)
         self.cls_convs2 = nn.ModuleList(Conv(256, 256, 3, 1, 1) for _ in ch)
         self.reg_convs1 = nn.ModuleList(Conv(256, 256, 3, 1, 1) for _ in ch)
@@ -640,19 +640,26 @@ class IDecoupledHead(nn.Module):
             # 融合ImplicitA和merge
             c1_merge, c2_merge, _, _ = self.merge[i].conv.weight.shape
             c1_ia, c2_ia, _, _ = self.ia[i].implicit.shape
+
+            if self.merge[i].conv.bias is None:
+                self.merge[i].conv.bias = torch.nn.Parameter(
+                    torch.zeros(self.merge[i].conv.weight.size(0), device=self.merge[i].conv.weight.device),
+                    requires_grad=False,
+                )
+
             self.merge[i].conv.bias += torch.matmul(self.merge[i].conv.weight.reshape(c1_merge, c2_merge),
                                           self.ia[i].implicit.reshape(c2_ia, c1_ia)).squeeze(1)
-            
+
             # 融合分类预测器的ImplicitM
             c1_cls, c2_cls, _, _ = self.im_cls[i].implicit.shape
             self.cls_preds[i].bias *= self.im_cls[i].implicit.reshape(c2_cls)
             self.cls_preds[i].weight *= self.im_cls[i].implicit.transpose(0, 1)
-            
+
             # 融合回归预测器的ImplicitM
             c1_reg, c2_reg, _, _ = self.im_reg[i].implicit.shape
             self.reg_preds[i].bias *= self.im_reg[i].implicit.reshape(c2_reg)
             self.reg_preds[i].weight *= self.im_reg[i].implicit.transpose(0, 1)
-            
+
             # 融合目标预测器的ImplicitM
             c1_obj, c2_obj, _, _ = self.im_obj[i].implicit.shape
             self.obj_preds[i].bias *= self.im_obj[i].implicit.reshape(c2_obj)
@@ -863,6 +870,11 @@ class Model(nn.Module):
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
         m = self.model[-1]  # DecoupledHead() module
         for i, s in enumerate(m.stride):  # from
+            # 初始化merge层偏置
+            b_merge = m.merge[i].conv.bias.view(-1)
+            b_merge.data[:] = 0.0  # 初始化为0
+            m.merge[i].conv.bias = torch.nn.Parameter(b_merge, requires_grad=True)
+            
             # 初始化目标检测偏置
             b_obj = m.obj_preds[i].bias.view(m.na, -1)
             b_obj.data[:] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
