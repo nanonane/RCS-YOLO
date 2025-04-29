@@ -3,11 +3,16 @@ import cv2
 import shutil
 from pathlib import Path
 import numpy as np
+import torchvision.transforms as transforms
+import torch
+import random
 
+image_size = 640
 
-def clahe(img):
+def clahe(img: np.array) -> np.array:
     """
     Enhance the input image using CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    and resize the image to 512x512 resolution if necessary.
     
     Args:
         img (numpy.ndarray): Input image array in BGR format
@@ -15,17 +20,33 @@ def clahe(img):
     Returns:
         numpy.ndarray: Enhanced image array in BGR format
     """
+    # Check if resizing is needed
+    h, w = img.shape[:2]
+    if h < image_size or w < image_size:
+        # Calculate scaling factor to make the shorter side 512
+        scale = image_size / min(h, w)
+        new_h, new_w = int(h * scale), int(w * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+    # Resize to image_size  (cropping or padding if necessary)
+    img = cv2.resize(img, (image_size, image_size), interpolation=cv2.INTER_LINEAR)
+
+    # Convert to LAB color space
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
+
+    # Apply CLAHE to the L channel
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     l2 = clahe.apply(l)
+
+    # Merge channels and convert back to BGR
     lab = cv2.merge((l2, a, b))
     enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     return enhanced
 
 
-def reduce_quality(img, contrast_factor=0.7, noise_std=25):
+def reduce_quality(img: np.array, contrast_factor=0.7, noise_std=25) -> np.array:
     """
     Reduce image quality by decreasing contrast and adding grayscale Gaussian noise
     
@@ -41,23 +62,23 @@ def reduce_quality(img, contrast_factor=0.7, noise_std=25):
     mean = np.mean(img, axis=(0, 1))
     reduced = img * contrast_factor + mean * (1 - contrast_factor)
     reduced = reduced.astype(np.uint8)
-    
+
     # Generate 2D grayscale Gaussian noise
     noise_2d = np.random.normal(0, noise_std, img.shape[:2]).astype(np.int16)
-    
+
     # Expand 2D noise to three channels
     noise = np.stack([noise_2d] * 3, axis=-1)
-    
+
     # Add noise to image
     noisy = cv2.add(reduced.astype(np.int16), noise)
-    
+
     # Ensure pixel values are within valid range [0, 255]
     noisy = np.clip(noisy, 0, 255).astype(np.uint8)
-    
+
     return noisy
 
 
-def process_dataset(src_root, dst_root, process):
+def process_dataset(src_root: str, dst_root: str, process) -> None:
     """
     Process the entire dataset by enhancing images and saving them to a new location.
     
