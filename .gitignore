@@ -7,6 +7,7 @@ dataset-brain-tumor/traindata*
 dataset-brain-tumor/valdata*
 dataset-brain-tumor/enhanced*
 dataset-brain-tumor/uncategorized*
+dataset-brain-tumor/categorized/no-tumor-original/
 
 train.sh
 test.sh
