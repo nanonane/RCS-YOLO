@@ -6,6 +6,7 @@ import numpy as np
 import torchvision.transforms as transforms
 import torch
 import random
+from tqdm import tqdm
 
 image_size = 640
 
@@ -78,6 +79,59 @@ def reduce_quality(img: np.array, contrast_factor=0.7, noise_std=25) -> np.array
     return noisy
 
 
+class AddGaussianNoise(object):
+    """
+    Custom transform to add Gaussian noise to an image.
+    """
+
+    def __init__(self, mean=0., var=.1, pov=0.6):
+        self.var = var
+        self.mean = mean
+        self.pov = pov
+
+    def __call__(self, tensor):
+        sigma = random.uniform(0, self.var ** self.pov)
+        noisyTensor = tensor + torch.randn(tensor.size()).uniform_(0, 1.) * sigma + self.mean
+        return noisyTensor
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(mean={0}, std={1})'.format(self.mean, self.var)
+
+
+def dpe_reduce(img: np.array, height=128, width=128) -> np.array:
+    """
+    Apply a series of transformations to the input image, including resizing,
+    color jitter, normalization, and adding Gaussian noise.
+
+    Args:
+        img (numpy.ndarray): Input image array in BGR format.
+        height(int): Resized height of image.
+        width(int): Resized width of image.
+
+    Returns:
+        numpy.ndarray: Transformed image array in BGR format.
+    """
+    # Define the transformation pipeline
+    transform_pipeline = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((height, width)),
+        transforms.ColorJitter(brightness=(0.1, 0.8), contrast=(0.1, 0.8)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        AddGaussianNoise(pov=1.5)
+    ])
+
+    # Apply transformations
+    transformed_tensor = transform_pipeline(img)
+
+    # Convert back to numpy array and BGR format
+    transformed_img = transformed_tensor.permute(1, 2, 0).numpy()  # Convert to HWC format
+    transformed_img = (transformed_img * 255).astype(np.uint8)  # Scale back to [0, 255]
+    transformed_img = cv2.cvtColor(transformed_img, cv2.COLOR_RGB2BGR)  # Convert to BGR
+
+    return transformed_img
+
+
 def process_dataset(src_root: str, dst_root: str, process) -> None:
     """
     Process the entire dataset by enhancing images and saving them to a new location.
@@ -106,7 +160,7 @@ def process_dataset(src_root: str, dst_root: str, process) -> None:
         os.makedirs(dst_path, exist_ok=True)
 
         # Iterate through all image files
-        for img_file in Path(src_path).glob('*.jpg'):
+        for img_file in tqdm(Path(src_path).glob('*.jpg')):
             # Read image
             img = cv2.imread(str(img_file))
             if img is None:
