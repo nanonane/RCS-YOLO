@@ -79,7 +79,7 @@ def change_label(src_dir):
 
 def move_data(src_dir, dst_dir):
     """
-    Move images and their corresponding .txt files from src_dir to dst_dir
+    Move images from src_dir to dst_dir and copy their corresponding .txt files
     based on the image numbers in traindata and testdata directories.
     """
     for data in ['traindata', 'valdata']:
